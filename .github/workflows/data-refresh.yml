@@ -1,0 +1,52 @@
+name: data-refresh
+
+# Камеры, АЗС, парковки, деревья, опасности, вышки из OSM — еженедельно (перенесено из приватного navigator:
+# в публичном репозитории минуты Actions не ограничены). Скрипт сбора берётся из navigator по NAVIGATOR_TOKEN.
+# Результат — в релиз updates этого репозитория, затем сборка приложения со свежими данными.
+on:
+  schedule:
+    - cron: "17 1 * * 1"   # еженедельно, понедельник 04:17 МСК
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kvilios/navigator
+          token: ${{ secrets.NAVIGATOR_TOKEN }}
+
+      - name: Cameras, fuel, parking from OSM
+        env:
+          MODE: data
+        run: |
+          mkdir -p out
+          python3 tools/fetch_assets.py out
+          ls -la out
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          c = json.load(open("out/cameras.json")); p = json.load(open("out/pois.json"))
+          assert len(c["cameras"]) >= 1000, "мало камер"
+          assert len(p["fuel"]) >= 1000, "мало АЗС"
+          print("cameras", len(c["cameras"]), c["generated"], "| fuel", len(p["fuel"]), "parking", len(p["parking"]), p["generated"])
+          PY
+          gh release view updates -R kvilios/navigator-data >/dev/null 2>&1 || \
+            gh release create updates -R kvilios/navigator-data --title "Обновления навигатора" --notes "Данные для автообновления приложения. Не удалять."
+          extra=""; [ -s out/trees.bin ] && extra="out/trees.bin"; [ -s out/hazards.bin ] && extra="$extra out/hazards.bin"; [ -s out/towers.json ] && extra="$extra out/towers.json"
+          gh release upload updates -R kvilios/navigator-data out/cameras.json out/pois.json $extra --clobber
+
+      - name: Build app with fresh data (manifest обновит сборка)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-app.yml -R kvilios/navigator-data --ref main
