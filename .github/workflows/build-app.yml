@@ -1,0 +1,257 @@
+name: build-app
+
+# Сборка и проверка приложения из ПРИВАТНОГО kvilios/navigator здесь, в публичном репозитории:
+# для публичных репозиториев минуты GitHub Actions бесплатны и не ограничены.
+# Код не публикуется: он только скачивается внутрь сборки по токену NAVIGATOR_TOKEN (секрет этого репозитория).
+# Логи сборки публичны — секреты в них маскируются.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ветка/коммит navigator"
+        default: main
+      skip_tests:
+        description: "Не гонять эмулятор"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-app
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      n: ${{ steps.num.outputs.n }}
+      sha: ${{ steps.num.outputs.sha }}
+    steps:
+      - name: Source (private kvilios/navigator)
+        uses: actions/checkout@v4
+        with:
+          repository: kvilios/navigator
+          token: ${{ secrets.NAVIGATOR_TOKEN }}
+          ref: ${{ inputs.ref }}
+
+      - name: Build number (продолжаем нумерацию из manifest.json)
+        id: num
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download updates -R kvilios/navigator-data -p manifest.json -O prev_manifest.json --clobber 2>/dev/null || echo '{}' > prev_manifest.json
+          N=$(python3 -c "import json; m=json.load(open('prev_manifest.json')); print(int(m.get('app',{}).get('build',0))+1)")
+          SHA=$(git rev-parse HEAD)
+          echo "n=$N" >> "$GITHUB_OUTPUT"; echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "BUILD_NUMBER=$N" >> "$GITHUB_ENV"; echo "N=$N" >> "$GITHUB_ENV"; echo "SRC_SHA=$SHA" >> "$GITHUB_ENV"
+          echo "build $N from $SHA"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Styles, glyphs + data (камеры, АЗС, парковки — готовые из navigator-data)
+        env:
+          GH_TOKEN: ${{ github.token }}   # navigator-data публичный — своим токеном
+        run: |
+          mkdir -p app/src/main/assets
+          MODE=styles python3 tools/fetch_assets.py app/src/main/assets
+          # данные собирает отдельный workflow data-refresh; здесь только скачиваем (секунды), иначе — запасная копия
+          # деревья — необязательны (нет файла — просто без деревьев)
+          # сначала через API (надёжнее CDN сразу после загрузки), потом curl с повторами, потом запасная копия из tools/fallback
+          for f in cameras.json pois.json trees.bin hazards.bin towers.json; do
+            rm -f "app/src/main/assets/$f"
+            gh release download updates -R kvilios/navigator-data -p "$f" -D app/src/main/assets --clobber 2>/dev/null \
+              || curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors -o "app/src/main/assets/$f" "https://github.com/kvilios/navigator-data/releases/download/updates/$f" \
+              || rm -f "app/src/main/assets/$f"
+            if [ ! -s "app/src/main/assets/$f" ] && [ -s "tools/fallback/$f" ]; then cp "tools/fallback/$f" app/src/main/assets/; echo "$f: запасная копия"; fi
+            ls -l "app/src/main/assets/$f" 2>/dev/null || echo "$f: нет"
+          done
+          # вышки ещё не опубликованы data-refresh — собираем прямо тут (небольшой запрос) и выкладываем
+          # опасности старого формата (без id дорог) — пересобираем тут (Overpass, ~5–10 мин)
+          if ! head -c 3 app/src/main/assets/hazards.bin 2>/dev/null | grep -q HZ2 || [ "$(stat -c %s app/src/main/assets/hazards.bin 2>/dev/null || echo 0)" -lt 400000 ]; then
+            MODE=hazards timeout 1500 python3 tools/fetch_assets.py app/src/main/assets || true
+            head -c 3 app/src/main/assets/hazards.bin | grep -q HZ2 && hz_fresh=1 || echo "hazards: остался старый формат"
+          fi
+          # совсем мало данных (сбой Overpass) — запасная копия из репо
+          if [ "$(stat -c %s app/src/main/assets/hazards.bin 2>/dev/null || echo 0)" -lt 300000 ]; then
+            cp tools/fallback/hazards.bin app/src/main/assets/hazards.bin; echo "hazards: запасная копия"
+          fi
+          # старый формат (без контуров домов) — пересобираем
+          # прошлая версия не теряется: если Overpass не ответит, остаётся она (или запасная копия из репо)
+          [ -s app/src/main/assets/towers.json ] || cp tools/fallback/towers.json app/src/main/assets/towers.json
+          if ! python3 -c "import json,sys; d=json.load(open('app/src/main/assets/towers.json')); sys.exit(0 if d.get('v', 1) >= 3 else 1)" 2>/dev/null; then
+            cp app/src/main/assets/towers.json /tmp/towers_prev.json
+            for attempt in 1 2; do
+              MODE=towers timeout 900 python3 tools/fetch_assets.py app/src/main/assets || true
+              python3 -c "import json,sys; d=json.load(open('app/src/main/assets/towers.json')); sys.exit(0 if d.get('v', 1) >= 3 else 1)" 2>/dev/null && break
+              sleep 60
+            done
+            python3 -c "import json,sys; d=json.load(open('app/src/main/assets/towers.json')); sys.exit(0 if d.get('v', 1) >= 3 else 1)" 2>/dev/null \
+              || { cp /tmp/towers_prev.json app/src/main/assets/towers.json; echo "towers: Overpass недоступен — оставил прошлую версию"; }
+          fi
+          ls -l app/src/main/assets/towers.json
+          python3 - <<'PY'
+          import json, os, shutil
+          A = "app/src/main/assets"
+          def ok(name, d):
+              return len(d.get("cameras" if name == "cameras.json" else "fuel", [])) >= 1000
+          for name in ("cameras.json", "pois.json"):
+              p = os.path.join(A, name)
+              try:
+                  good = ok(name, json.load(open(p)))
+              except Exception:
+                  good = False
+              if not good:
+                  shutil.copy(os.path.join("tools/fallback", name), p)
+                  print(f"::warning::{name}: из navigator-data не подошёл — взята запасная копия")
+              d = json.load(open(p))
+              print(name, d.get("generated"), len(d.get("cameras", d.get("fuel", []))))
+          PY
+          ls -la app/src/main/assets app/src/main/assets/offline || true
+
+      - name: Speed rules (if built)
+        env:
+          GH_TOKEN: ${{ secrets.NAVIGATOR_TOKEN }}
+        run: |
+          gh release download data-spb-lo -R kvilios/navigator -p 'speed-rules-spb-lo.bin' -D app/src/main/assets --clobber \
+            && ls -la app/src/main/assets/speed-rules-spb-lo.bin || echo "no speed rules yet"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk out/navigator-$N.apk
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: out/*.apk
+          retention-days: 7
+
+      - name: Publish updates to navigator-data (публичный репозиторий только с данными)
+        env:
+          GH_TOKEN: ${{ secrets.NAVIGATOR_TOKEN }}
+          DATA_TOKEN: ${{ github.token }}
+          REPO: kvilios/navigator
+          DATA_REPO: kvilios/navigator-data
+          SHA: ${{ env.SRC_SHA }}
+        run: |
+          # данные о регионе — из приватного релиза (своим токеном)
+          gh api "repos/$REPO/releases/tags/data-spb-lo" --jq '.assets[] | select(.name=="region-spb-lo.zip") | {size, updated_at}' > region.json 2>/dev/null || echo '{}' > region.json
+          export GH_TOKEN="$DATA_TOKEN"
+          gh release view updates -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create updates -R "$DATA_REPO" --title "Обновления навигатора" --notes "Данные для автообновления приложения. Не удалять."
+          gh release download updates -R "$DATA_REPO" -p manifest.json -O prev.json --clobber 2>/dev/null || echo '{}' > prev.json
+          python3 - <<'PY'
+          import json, os
+          prev = json.load(open("prev.json")) if os.path.getsize("prev.json") else {}
+          reg = json.load(open("region.json")) if os.path.getsize("region.json") else {}
+          cams = json.load(open("app/src/main/assets/cameras.json"))
+          base = f"https://github.com/{os.environ['DATA_REPO']}/releases/download/updates"
+          m = {"cameras": {"date": cams.get("generated", ""), "count": len(cams["cameras"]), "url": f"{base}/cameras.json"}}
+          if os.path.exists("app/src/main/assets/pois.json"):
+              pj = json.load(open("app/src/main/assets/pois.json"))
+              m["pois"] = {"date": pj.get("generated", ""), "url": f"{base}/pois.json"}
+          if os.path.exists("app/src/main/assets/towers.json"):
+              tj = json.load(open("app/src/main/assets/towers.json"))
+              m["mapdata"] = {"date": tj.get("generated", ""), "files": {
+                  f: f"{base}/{f}" for f in ("towers.json", "hazards.bin", "trees.bin") if os.path.exists(f"app/src/main/assets/{f}")}}
+          if reg:
+              date = reg["updated_at"][:10]
+              m["region"] = {"date": date, "size": reg["size"], "url": f"{base}/region-spb-lo.zip"}
+              if prev.get("region", {}).get("date") != date:
+                  open("new_region", "w").close()   # регион обновился — перекладываем архив в публичный релиз
+          old = prev.get("app", {})
+          if old.get("sha") == os.environ["SHA"]:
+              m["app"] = old                         # еженедельная сборка без изменений кода — приложение не предлагаем
+          else:
+              m["app"] = {"build": int(os.environ["N"]), "sha": os.environ["SHA"], "url": f"{base}/navigator.apk"}
+              open("new_apk", "w").close()
+          json.dump(m, open("manifest.json", "w"), ensure_ascii=False, indent=1)
+          print(json.dumps(m, ensure_ascii=False))
+          PY
+          # cameras.json/pois.json выкладывает data-refresh; запасную копию (если взяли её) тоже выложим — она рабочая
+          cp app/src/main/assets/cameras.json cameras.json
+          cp app/src/main/assets/pois.json pois.json
+          files="cameras.json pois.json"
+          # вышки сборка может собрать сама (если data-refresh ещё не выкладывал) — выкладываем; деревья и опасности выкладывает data-refresh
+          [ -s app/src/main/assets/towers.json ] && cp app/src/main/assets/towers.json towers.json && files="$files towers.json"
+          head -c 3 app/src/main/assets/hazards.bin 2>/dev/null | grep -q HZ2 && [ "$(stat -c %s app/src/main/assets/hazards.bin)" -ge 400000 ] && cp app/src/main/assets/hazards.bin hazards.bin && files="$files hazards.bin"
+          # navigator.apk — «последняя»; navigator-<N>.apk — явная версия (держим 2 последние)
+          if [ -f new_apk ]; then cp out/navigator-$N.apk navigator.apk; cp out/navigator-$N.apk navigator-$N.apk; files="$files navigator.apk navigator-$N.apk"; fi
+          if [ -f new_region ]; then
+            GH_TOKEN="${{ secrets.NAVIGATOR_TOKEN }}" gh release download data-spb-lo -R "$REPO" -p region-spb-lo.zip --clobber && files="$files region-spb-lo.zip"
+          fi
+          gh release upload updates -R "$DATA_REPO" $files --clobber
+          # манифест — последним: приложение не увидит ссылку на ещё не загруженный файл
+          gh release upload updates -R "$DATA_REPO" manifest.json --clobber
+          echo "published: $files manifest.json"
+          gh release view updates -R "$DATA_REPO" --json assets --jq '.assets[].name' | grep -E '^navigator-[0-9]+\.apk$' \
+            | sort -t- -k2 -n | head -n -2 | while read a; do gh release delete-asset updates "$a" -R "$DATA_REPO" -y && echo "deleted $a"; done || true
+
+  emulator-test:
+    needs: build
+    if: ${{ !inputs.skip_tests }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kvilios/navigator
+          token: ${{ secrets.NAVIGATOR_TOKEN }}
+          ref: ${{ needs.build.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: apk
+          path: apk
+
+      - name: Offline region (if built)
+        env:
+          GH_TOKEN: ${{ secrets.NAVIGATOR_TOKEN }}
+        run: |
+          mkdir -p data
+          gh release download data-spb-lo -R kvilios/navigator -p 'region-spb-lo.zip' -D data || echo "no offline region yet"
+          ls -la data
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run scenarios
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash tools/ci/emulator_test.sh
+
+      # результаты (скриншоты, логи) — в ПРИВАТНЫЙ navigator, ветка ci-artifacts (сюда не выкладываем)
+      - name: Publish results to ci-artifacts branch (private repo)
+        if: always()
+        run: |
+          [ -d ci-out ] || exit 0
+          cd ci-out
+          git init -q -b ci-artifacts
+          git config user.name "ci"
+          git config user.email "ci@users.noreply.github.com"
+          echo "run ${{ needs.build.outputs.n }} ${{ needs.build.outputs.sha }}" > RUN.txt
+          git add -A
+          git commit -q -m "emulator run ${{ needs.build.outputs.n }}"
+          git push -f "https://x-access-token:${{ secrets.NAVIGATOR_TOKEN }}@github.com/kvilios/navigator.git" ci-artifacts
