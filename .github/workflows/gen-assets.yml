@@ -1,0 +1,57 @@
+name: gen-assets
+
+# Платная генерация графики/озвучки через gen-api (перенесено из приватного navigator). Только вручную.
+# Скрипты — из navigator (NAVIGATOR_TOKEN); ключ gen-api — секрет GEN_API_KEY этого репозитория.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "art или voice"
+        required: true
+        default: "art"
+      ids:
+        description: "id через пробел (пусто — всё)"
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  gen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kvilios/navigator
+          token: ${{ secrets.NAVIGATOR_TOKEN }}
+      - name: ffmpeg
+        if: inputs.mode == 'voice'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Reference images (публичная ссылка для gen-api)
+        if: inputs.mode == 'art'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls tools/art/ref/*.png >/dev/null 2>&1 || exit 0
+          gh release view art-ref -R kvilios/navigator-data >/dev/null 2>&1 || \
+            gh release create art-ref -R kvilios/navigator-data --title "Образцы для генерации графики" --notes "Служебное"
+          gh release upload art-ref -R kvilios/navigator-data tools/art/ref/*.png --clobber
+          sleep 5
+      - name: Generate
+        env:
+          GEN_API_KEY: ${{ secrets.GEN_API_KEY }}
+          REF_BASE: https://github.com/kvilios/navigator-data/releases/download/art-ref/
+        run: |
+          [ -n "$GEN_API_KEY" ] || { echo "::error::нет секрета GEN_API_KEY в navigator-data"; exit 1; }
+          python3 tools/gen_assets.py ${{ inputs.mode }} ${{ inputs.ids }}
+      - name: Pack
+        run: cd out/gen && zip -qr ../gen-${{ inputs.mode }}.zip . && ls -la ..
+      # результат — в приватный navigator (релиз gen-assets), как раньше
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.NAVIGATOR_TOKEN }}
+        run: |
+          gh release view gen-assets -R kvilios/navigator >/dev/null 2>&1 || \
+            gh release create gen-assets -R kvilios/navigator --title "Сгенерированные ассеты" --notes "Сырые результаты gen-api" --prerelease
+          gh release upload gen-assets -R kvilios/navigator out/gen-${{ inputs.mode }}.zip --clobber
