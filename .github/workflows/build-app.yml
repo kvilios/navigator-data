@@ -167,6 +167,7 @@ jobs:
           gh release view updates -R "$DATA_REPO" >/dev/null 2>&1 || \
             gh release create updates -R "$DATA_REPO" --title "Обновления навигатора" --notes "Данные для автообновления приложения. Не удалять."
           gh release download updates -R "$DATA_REPO" -p manifest.json -O prev.json --clobber 2>/dev/null || echo '{}' > prev.json
+          gh api "repos/$DATA_REPO/releases/tags/updates" --jq '[.assets[]|{name,updated_at}]' > assets.json 2>/dev/null || echo '[]' > assets.json
           python3 - <<'PY'
           import json, os
           prev = json.load(open("prev.json")) if os.path.getsize("prev.json") else {}
@@ -179,7 +180,10 @@ jobs:
               m["pois"] = {"date": pj.get("generated", ""), "url": f"{base}/pois.json"}
           if os.path.exists("app/src/main/assets/towers.json"):
               tj = json.load(open("app/src/main/assets/towers.json"))
-              m["mapdata"] = {"date": tj.get("generated", ""), "files": {
+              # дата данных карты — самая свежая из towers.json и загрузок опасностей/деревьев (их можно обновить по отдельности)
+              up = {x["name"]: x["updated_at"][:10] for x in json.load(open("assets.json"))}
+              md = max([tj.get("generated", "")[:10]] + [up.get(f, "") for f in ("hazards.bin", "trees.bin", "towers.json")])
+              m["mapdata"] = {"date": md, "files": {
                   f: f"{base}/{f}" for f in ("towers.json", "hazards.bin", "trees.bin") if os.path.exists(f"app/src/main/assets/{f}")}}
           if reg:
               date = reg["updated_at"][:10]
