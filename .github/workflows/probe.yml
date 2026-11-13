@@ -2,16 +2,26 @@ name: probe
 on:
   workflow_dispatch:
     inputs:
-      urls: {description: "urls через пробел", required: true}
+      urls: {description: "urls через пробел", required: false, default: ""}
+      py: {description: "python-код для проверки tools/fetch_assets.py на малой области", required: false, default: ""}
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - run: |
+      - uses: actions/checkout@v4
+        if: ${{ inputs.py != '' }}
+        with:
+          repository: kvilios/navigator
+          token: ${{ secrets.NAVIGATOR_TOKEN }}
+      - if: ${{ inputs.py != '' }}
+        env:
+          PY: ${{ inputs.py }}
+        run: cd tools && mkdir -p /tmp/o && python3 -c "$PY"
+      - if: ${{ inputs.urls != '' }}
+        run: |
           set +e
           for u in ${{ inputs.urls }}; do
             echo "=== $u"
             curl -sSL -m 40 -A "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" -o body -w "HTTP %{http_code} %{size_download}B %{url_effective}\n" "$u" || echo "FAIL"
-            head -c 1500 body 2>/dev/null; echo; touch body
-            grep -oiE "(src|href|url)[=:][\"'][^\"']*(json|api|ajax|milestone|camera|cams)[^\"']*" body | sort -u | head -40
+            head -c 600 body 2>/dev/null; echo; rm -f body
           done
