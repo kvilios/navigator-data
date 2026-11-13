@@ -115,6 +115,20 @@ jobs:
           PY
           ls -la app/src/main/assets app/src/main/assets/offline || true
 
+      - name: Camera rules (если в данных камер ещё нет правил — добавить)
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          sys.path.insert(0, "tools")
+          p = "app/src/main/assets/cameras.json"
+          d = json.load(open(p))
+          if "rules" not in d:
+              from fetch_assets import CAMERA_RULES
+              d = {"generated": d.get("generated"), "source": d.get("source"), "rules": CAMERA_RULES, "cameras": d["cameras"]}
+              json.dump(d, open(p, "w"), ensure_ascii=False, separators=(",", ":"))
+              print("rules added")
+          PY
+
       - name: Speed rules (if built)
         env:
           GH_TOKEN: ${{ secrets.NAVIGATOR_TOKEN }}
