@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "17 1 * * 1"   # еженедельно, понедельник 04:17 МСК
   workflow_dispatch:
+    inputs:
+      only:
+        description: "пусто — всё; hazards — только опасности (светофоры, лежачие, знаки, аварийные участки)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -24,7 +29,7 @@ jobs:
 
       - name: Cameras, fuel, parking from OSM
         env:
-          MODE: data
+          MODE: ${{ inputs.only || 'data' }}
         run: |
           mkdir -p out
           python3 tools/fetch_assets.py out
@@ -34,6 +39,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ "${{ inputs.only }}" = "hazards" ]; then
+            [ -s out/hazards.bin ] || { echo "::error::нет hazards.bin"; exit 1; }
+            gh release upload updates -R kvilios/navigator-data out/hazards.bin --clobber; exit 0
+          fi
           python3 - <<'PY'
           import json
           c = json.load(open("out/cameras.json")); p = json.load(open("out/pois.json"))
