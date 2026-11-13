@@ -8,9 +8,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
+          set +e
           for u in ${{ inputs.urls }}; do
             echo "=== $u"
             curl -sSL -m 40 -A "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36" -o body -w "HTTP %{http_code} %{size_download}B %{url_effective}\n" "$u" || echo "FAIL"
-            head -c 1500 body; echo
+            head -c 1500 body 2>/dev/null; echo; touch body
             grep -oiE "(src|href|url)[=:][\"'][^\"']*(json|api|ajax|milestone|camera|cams)[^\"']*" body | sort -u | head -40
           done
