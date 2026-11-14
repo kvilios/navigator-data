@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "пусто — всё; hazards — только опасности (светофоры, лежачие, знаки, аварийные участки)"
+        description: "пусто — всё; hazards — только опасности; cameras — только камеры (OSM + списки ГИБДД)"
         required: false
         default: ""
 
@@ -32,6 +32,7 @@ jobs:
           MODE: ${{ inputs.only || 'data' }}
         run: |
           mkdir -p out
+          pip install -q --break-system-packages openpyxl 2>/dev/null || pip install -q openpyxl
           python3 tools/fetch_assets.py out
           ls -la out
 
@@ -39,6 +40,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [ "${{ inputs.only }}" = "cameras" ]; then
+            python3 -c "import json; c=json.load(open('out/cameras.json')); assert len(c['cameras'])>=1000"
+            gh release upload updates -R kvilios/navigator-data out/cameras.json --clobber; exit 0
+          fi
           if [ "${{ inputs.only }}" = "hazards" ]; then
             [ -s out/hazards.bin ] || { echo "::error::нет hazards.bin"; exit 1; }
             gh release upload updates -R kvilios/navigator-data out/hazards.bin --clobber; exit 0
