@@ -15,6 +15,10 @@ on:
         description: "Не гонять эмулятор"
         type: boolean
         default: false
+      ui_only:
+        description: "Эмулятор: только скриншоты интерфейса (без поездок)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -251,6 +255,8 @@ jobs:
 
       - name: Run scenarios
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          UI_ONLY: ${{ inputs.ui_only && '1' || '' }}
         with:
           api-level: 34
           target: google_apis
