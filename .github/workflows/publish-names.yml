@@ -1,0 +1,28 @@
+name: publish-names
+
+# Публикация пакета озвучки названий (voice-names-spb-lo.zip) из ветки voice-names приватного navigator
+# в релиз updates — откуда его скачивает приложение. Только вручную.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kvilios/navigator
+          ref: voice-names
+          token: ${{ secrets.NAVIGATOR_TOKEN }}
+      - name: Check
+        run: |
+          ls -la voice-names-spb-lo.zip
+          unzip -l voice-names-spb-lo.zip | tail -1
+          unzip -p voice-names-spb-lo.zip index.json | head -c 200; echo
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload updates -R ${{ github.repository }} voice-names-spb-lo.zip --clobber
