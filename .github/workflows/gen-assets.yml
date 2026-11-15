@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "art или voice"
+        description: "art, voice или names (названия для поворотов)"
         required: true
         default: "art"
       ids:
@@ -19,14 +19,14 @@ permissions:
 jobs:
   gen:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:
           repository: kvilios/navigator
           token: ${{ secrets.NAVIGATOR_TOKEN }}
       - name: ffmpeg
-        if: inputs.mode == 'voice'
+        if: inputs.mode != 'art'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: Reference images (публичная ссылка для gen-api)
         if: inputs.mode == 'art'
