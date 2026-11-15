@@ -194,6 +194,9 @@ jobs:
               m["region"] = {"date": date, "size": reg["size"], "url": f"{base}/region-spb-lo.zip"}
               if prev.get("region", {}).get("date") != date:
                   open("new_region", "w").close()   # регион обновился — перекладываем архив в публичный релиз
+          up_all = {x["name"]: x["updated_at"][:10] for x in json.load(open("assets.json"))}
+          if "voice-names-spb-lo.zip" in up_all:
+              m["names"] = {"date": up_all["voice-names-spb-lo.zip"], "url": f"{base}/voice-names-spb-lo.zip"}
           old = prev.get("app", {})
           if old.get("sha") == os.environ["SHA"]:
               m["app"] = old                         # еженедельная сборка без изменений кода — приложение не предлагаем
