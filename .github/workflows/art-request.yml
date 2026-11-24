@@ -1,0 +1,60 @@
+name: Gen-API art request
+on:
+  push:
+    branches: [main]
+    paths: [art-request.json]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.read.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: read
+        name: Identify the art request
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          req = json.loads(Path("art-request.json").read_text())
+          sheet, version = req["sheet"], req["version"]
+          if not isinstance(sheet, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,47}", sheet):
+              raise ValueError("Invalid sheet id")
+          if type(version) is not int or not 1 <= version <= 999999:
+              raise ValueError("Invalid request version")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"key={sheet}-v{version}", file=output)
+          PY
+
+  art:
+    needs: request
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    concurrency:
+      group: gen-art-${{ needs.request.outputs.key }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: request
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: kvilios/navigator
+          ref: main
+          token: ${{ secrets.NAVIGATOR_TOKEN }}
+          path: source
+      - name: Process one sheet in the private repository
+        working-directory: source
+        env:
+          GEN_API_KEY: ${{ secrets.GEN_API_KEY }}
+          GH_TOKEN: ${{ secrets.NAVIGATOR_TOKEN }}
+          REF_BASE: https://github.com/kvilios/navigator-data/releases/download/art-ref/
+        run: python3 tools/ci/art_request.py ../request/art-request.json
